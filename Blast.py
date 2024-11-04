@@ -1,53 +1,67 @@
-from Bio.Blast.Applications import NcbiblastnCommandline
 from Bio import SeqIO
 from Bio.Blast import NCBIXML
+import subprocess
 import os
+import io  
 
-# Paths to the human and mouse fasta files
-human_fasta_path = "human.fa"
-mouse_fasta_path = "mouse.fa"
+# File paths
+human_file = "human.fa"
+mouse_file = "mouse.fa"
+mouse_db = "mouse_db"  
+
+# Parsing human sequences
+human_sequences = list(SeqIO.parse(human_file, "fasta"))
+
+# Creating a BLAST database 
+if not os.path.exists(mouse_db + ".pin"):
+    subprocess.run(["makeblastdb", "-in", mouse_file, "-dbtype", "prot", "-out", mouse_db])
+
+# Running BLAST for each human sequence
 output_file = "blast_results.txt"
+with open(output_file, "w") as f:
+    for human_seq in human_sequences:
+        with open("temp_human_query.fa", "w") as temp_query_file:
+            SeqIO.write(human_seq, temp_query_file, "fasta")
+        blast_command = [
+            "blastp", 
+            "-query", "temp_human_query.fa", 
+            "-db", mouse_db, 
+            "-evalue", "1e-5", 
+            "-outfmt", "5", 
+            "-num_alignments", "1"
+        ]
+        
+        # Executing BLAST
+        result = subprocess.run(blast_command, capture_output=True, text=True)
+        
+        # Checking for errors
+        if result.returncode != 0:
+            print(f"Error running BLAST: {result.stderr}")
+            continue
 
-# Prepare the BLAST database from mouse.fa
-makeblastdb_cmd = f"makeblastdb -in {mouse_fasta_path} -dbtype nucl"
-os.system(makeblastdb_cmd)
+        blast_record = NCBIXML.read(io.StringIO(result.stdout))
 
-# Open the output file for writing results
-with open(output_file, "w") as output:
-    # Iterate through each sequence in the human file
-    for record in SeqIO.parse(human_fasta_path, "fasta"):
-        # Write the individual human sequence to a temporary file
-        with open("temp_human.fa", "w") as temp_file:
-            SeqIO.write(record, temp_file, "fasta")
+        # Processing results if alignments are found
+        if blast_record.alignments:
+            top_alignment = blast_record.alignments[0]
+            top_hsp = top_alignment.hsps[0]
+            
+            # Extracting the Mouse Sequence ID from the hit ID
+            mouse_id = top_alignment.hit_id.split("|")[1]
+            
+            # Writing the results to the output file
+            f.write(f"Human Seq ID: {human_seq.id}\n")
+            f.write(f"Mouse Seq ID: {mouse_id}\n")
+            f.write(f"Alignment:\n{top_hsp.sbjct}\n")
+            f.write(f"E-value: {top_hsp.expect}\n")
+            f.write(f"Bitscore: {top_hsp.bits}\n\n")
+            
+# 1. I used BLASTp for the comparison since it’s designed for aligning protein sequences,
+# making it suitable for analyzing similarities between mouse and human proteins.
 
-        # Run the BLAST search
-        blastn_cline = NcbiblastnCommandline(
-            query="temp_human.fa",
-            db=mouse_fasta_path,
-            evalue=1e-5,
-            outfmt=5,  # XML format for easy parsing
-            out="temp_blast.xml"
-        )
-        stdout, stderr = blastn_cline()
+# 2. BLOSUM62 was chosen as it is the default matrix for BLASTp and is particularly effective
+# for proteins with moderate divergence, which is typical in comparisons between two mammalian species.
 
-        # Parse the BLAST XML output
-        with open("temp_blast.xml") as blast_result:
-            blast_records = NCBIXML.parse(blast_result)
-            for blast_record in blast_records:
-                if blast_record.alignments:
-                    # Process the top alignment
-                    top_hit = blast_record.alignments[0]
-                    hsp = top_hit.hsps[0]
-                    output.write(
-                        f"Human ID: {record.id}\n"
-                        f"Mouse ID: {top_hit.hit_id}\n"
-                        f"Alignment:\n{hsp.sbjct}\n{hsp.query}\n\n"
-                        f"E-value: {hsp.expect}\n"
-                        f"Bitscore: {hsp.bits}\n\n"
-                    )
-                else:
-                    output.write(f"Human ID: {record.id}\nNo homolog found.\n\n")
-
-# Cleanup temporary files
-os.remove("temp_human.fa")
-os.remove("temp_blast.xml")
+# 3. An E-value of 0.00001 ensures a high threshold, filtering out random matches while still capturing significant alignments.
+# By setting the number of alignments to 1, we focus on the most homologous sequence, minimizing processing needs.
+# Additionally, using the XML format (outfmt 5) simplifies parsing for IDs and alignment details.
